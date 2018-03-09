@@ -4,6 +4,8 @@
 import numpy as np
 from scipy.ndimage.filters import gaussian_filter
 from scipy.ndimage.interpolation import affine_transform
+from skimage.transform import resize
+from skimage.io import imsave
 import matplotlib.pyplot as plt
 
 import tensorflow as tf
@@ -12,6 +14,7 @@ import keras.backend as K
 
 def deprocess_image(x):
     # normalize tensor: center on 0., ensure std is 0.1
+    x = x.copy()
     x -= x.mean()
     x /= (x.std() + 1e-5)
     x *= 0.1
@@ -94,38 +97,49 @@ def normalize(x):
     return x / (K.sqrt(K.mean(K.square(x))) + K.epsilon())
 
 
-def visualize(model, layer_name, filter_index, img_width=128, img_height=128, step=1., num_iter=20):
+def process_gradient(g):
+    return g
+
+
+def visualize(model, layer_name, filter_index, img_width=128, img_height=128, step=1., num_iter=20, num_octaves=1, octave_scale=1):
     layer_output = model.get_layer(layer_name).output
     loss = K.mean(layer_output[:, :, :, filter_index])
-
     grads = K.gradients(loss, model.input)[0]
-
     grads = normalize(grads)
-
-    # we start from a gray image with some random noise
-    input_img_data = np.random.random((img_width, img_height, 3))
-    input_img_data = (input_img_data - 0.5) * 6
-
     iterate = K.function([model.input, K.learning_phase()], [loss, grads])
 
+    # multiscale setup
+    octaves = octave_scale ** - np.arange(num_octaves)[::-1]
+    img_height = np.round(img_height * octaves).astype(np.int)
+    img_width = np.round(img_width * octaves).astype(np.int)
 
-    for i in range(num_iter):
-        # affine transformation
-        T = get_transformation_matrix()
+    # we start from a gray image with some random noise
+    x = np.random.random((img_height[0], img_width[0], 3))
+    x = (x - 0.5) * 6
 
-        input_img_data_transformed = transform_image(input_img_data, T)
+    for o in range(num_octaves):
+        x = resize(x, (img_height[o], img_width[o]))
+        for i in range(num_iter):
+            # affine transformation
+            T = get_transformation_matrix()
 
-        loss_value, grads_value = iterate([input_img_data_transformed[None, ...], 0])
+            x_t = transform_image(x, T)
 
-        # inverse transform gradient
-        grads_value_transformed = transform_image(grads_value[0], T, inverse=True)
+            loss_value, grads_value = iterate([x_t[None, ...], 0])
 
-        input_img_data += grads_value_transformed * step
+            # inverse transform gradient
+            grads_value_transformed = transform_image(grads_value[0], T, inverse=True)
 
-        print('Current loss value:', loss_value)
+            grads_value_transformed = process_gradient(grads_value_transformed)
+
+            x += grads_value_transformed * step
+
+            imsave('debug/%d_%d.bmp' % (o, i), deprocess_image(x))
+
+            print('Current loss value:', loss_value)
 
     # deprocess the resulting input image
-    img = deprocess_image(input_img_data)
+    img = deprocess_image(x)
     return img
 
 
@@ -133,7 +147,14 @@ if __name__ == '__main__':
     from keras.applications import vgg16
 
     model = vgg16.VGG16(weights='imagenet', include_top=False)
-    img = visualize(model, 'block4_conv2', 7, img_width=128, img_height=128, step=1., num_iter=20)
+    model.summary()
+    layer_name = 'block5_conv2'
+    filter_id = 74
+    img_width = 128
+    img_height = 128
+    img = visualize(model, layer_name, filter_id, img_width=img_width, img_height=img_height, step=1., num_iter=20, num_octaves=3, octave_scale=1.4)
+
+    imsave('%s_%d_%dx%d.bmp' % (layer_name, filter_id, img_width, img_height), img)
 
     plt.figure()
     plt.imshow(img)
